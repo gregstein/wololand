@@ -1,0 +1,23 @@
+[package]
+name = "wololand"
+version = "0.1.0"
+edition = "2024"
+authors = ["Mohammed Amine Belbachir (GregStein)"]
+description = "Age of Empires II maps that grow around your Windows desktop icons"
+license = "MIT"
+repository = "https://github.com/gregstein/wololand"
+homepage = "https://ageofnotes.com/wololand/"
+
+[dependencies]
+anyhow = "1.0.104"
+futures = "0.3"
+gpui = "0.2.2"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_Console"] }
+windows-registry = "0.5"
+
+[build-dependencies]
+embed-resource = "3"
