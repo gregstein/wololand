@@ -145,6 +145,12 @@ impl Wallpaper {
         true
     }
 
+    /// Reloads the theme from scratch, e.g. after the game folder changed.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.theme = None;
+        self.settings_changed(cx);
+    }
+
     pub fn settings_changed(&mut self, cx: &mut Context<Self>) {
         let s = self.settings(cx).clone();
         if self.theme != Some(s.theme) {
@@ -595,7 +601,24 @@ pub fn open_settings(cx: &mut App) {
     }
 }
 
+/// Switches to another game folder (`custom` empty = auto-detected) and rebuilds the wallpaper.
+fn set_game(game: Option<Game>, custom: String, cx: &mut App) {
+    let st = cx.global_mut::<AppState>();
+    st.settings.game_path = custom;
+    st.settings.save();
+    st.game = game.map(Arc::new);
+    let has = st.game.is_some();
+    match st.wallpaper.clone() {
+        Some(wp) => wp.update(cx, |w, cx| w.reload(cx)),
+        None if has => open_wallpaper(cx),
+        None => {}
+    }
+    cx.refresh_windows();
+}
+
 pub struct SettingsView {
+    /// Message under the game folder row (a folder without the game, nothing found...).
+    path_msg: Option<SharedString>,
     thumbs: Vec<Option<Arc<RenderImage>>>,
     autostart: bool,
     /// `resources/_common/wpfg` of the game install: the game's own menu art is used in place.
@@ -605,26 +628,41 @@ pub struct SettingsView {
 
 impl SettingsView {
     fn new(cx: &mut Context<Self>) -> Self {
-        if let Some(game) = cx.global::<AppState>().game.clone() {
-            let root = game.root().to_path_buf();
-            cx.spawn(async move |this, cx| {
-                for (i, theme) in Theme::ALL.into_iter().enumerate() {
-                    let root = root.clone();
-                    let thumb = cx.background_spawn(async move { make_thumb(&root, theme) }).await;
-                    if this.update(cx, |this, cx| {
+        let ui = cx.global::<AppState>().game.as_ref().map(|g| g.root().join("resources/_common/wpfg")).unwrap_or_default();
+        let mut v = SettingsView { path_msg: None, thumbs: vec![None; Theme::ALL.len()], autostart: settings::autostart_enabled(), ui, icon: app_icon(28) };
+        v.start_thumbs(cx);
+        v
+    }
+
+    fn start_thumbs(&mut self, cx: &mut Context<Self>) {
+        let Some(game) = cx.global::<AppState>().game.clone() else { return };
+        self.thumbs = vec![None; Theme::ALL.len()];
+        let root = game.root().to_path_buf();
+        cx.spawn(async move |this, cx| {
+            for (i, theme) in Theme::ALL.into_iter().enumerate() {
+                let root = root.clone();
+                let thumb = cx.background_spawn(async move { make_thumb(&root, theme) }).await;
+                if this
+                    .update(cx, |this, cx| {
                         this.thumbs[i] = thumb;
                         cx.notify();
                     })
                     .is_err()
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
-            })
-            .detach();
-        }
-        let ui = cx.global::<AppState>().game.as_ref().map(|g| g.root().join("resources/_common/wpfg")).unwrap_or_default();
-        SettingsView { thumbs: vec![None; Theme::ALL.len()], autostart: settings::autostart_enabled(), ui, icon: app_icon(28) }
+            }
+        })
+        .detach();
+    }
+
+    /// Applies a newly found game to the app and to this window.
+    fn use_game(&mut self, game: Game, custom: String, cx: &mut Context<Self>) {
+        self.ui = game.root().join("resources/_common/wpfg");
+        self.path_msg = None;
+        set_game(Some(game), custom, cx);
+        self.start_thumbs(cx);
+        cx.notify();
     }
 }
 
@@ -845,7 +883,7 @@ impl Render for SettingsView {
         let ui = self.ui.clone();
         let game_line: SharedString = match &st.game {
             Some(g) => format!("Art is read in place from {}", g.root().display()).into(),
-            None => "Age of Empires II: Definitive Edition was not found. Install it from Steam, then restart Wololand.".into(),
+            None => "Age of Empires II: Definitive Edition was not found. Choose its folder under Game Folder.".into(),
         };
         let status = st.wallpaper.as_ref().map(|w| w.read(cx).status.clone()).unwrap_or_default();
         let sel = Theme::ALL.iter().position(|&t| t == s.theme).unwrap_or(0);
@@ -951,6 +989,56 @@ impl Render for SettingsView {
                 ),
         );
 
+        let custom = !s.game_path.is_empty();
+        let path_text: SharedString = match &st.game {
+            Some(g) => format!("{}{}", g.root().display(), if custom { "  (set by you)" } else { "  (found automatically)" }).into(),
+            None => "Not found. Pick the folder where Age of Empires II: Definitive Edition is installed.".into(),
+        };
+        let game_panel = panel().child(
+            panel_inner()
+                .child(heading("Game Folder:"))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().text_color(rgb(INK)).child(path_text))
+                        .child(red_button(&ui, "pick-game", "Change Folder", 180.0, 34.0, false).on_click(cx.listener(|_, _, _, cx| {
+                            let rx = cx.prompt_for_paths(PathPromptOptions {
+                                files: false,
+                                directories: true,
+                                multiple: false,
+                                prompt: Some("Use this folder".into()),
+                            });
+                            cx.spawn(async move |this, cx| {
+                                let Ok(Ok(Some(paths))) = rx.await else { return };
+                                let Some(dir) = paths.into_iter().next() else { return };
+                                let game = Game::at(&dir);
+                                let _ = this.update(cx, |this, cx| match game {
+                                    Some(g) => {
+                                        let root = g.root().to_string_lossy().to_string();
+                                        this.use_game(g, root, cx);
+                                    }
+                                    None => {
+                                        this.path_msg = Some(format!("No Age of Empires II: DE game files in {}", dir.display()).into());
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        })))
+                        .child(red_button(&ui, "auto-game", "Auto-detect", 150.0, 34.0, false).on_click(cx.listener(|this, _, _, cx| match Game::detect() {
+                            Some(g) => this.use_game(g, String::new(), cx),
+                            None => {
+                                this.path_msg = Some("Not found on Steam or the Microsoft Store / Xbox app. Use Change Folder.".into());
+                                cx.notify();
+                            }
+                        }))),
+                )
+                .when_some(self.path_msg.clone(), |d, m| d.child(div().text_sm().text_color(rgb(0x8e1010)).child(m)))
+                .child(div().text_sm().text_color(rgb(INK_SOFT)).child("Steam and Microsoft Store / Xbox app installs are found automatically.")),
+        );
+
         let title = div()
             .relative()
             .w(px(440.0))
@@ -988,6 +1076,7 @@ impl Render for SettingsView {
                     )
                     .child(current)
                     .child(div().flex().gap_4().child(options).child(maps))
+                    .child(game_panel)
                     .child(
                         div()
                             .flex()

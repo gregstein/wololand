@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Age of Empires II maps that grow around your Windows desktop icons.</b><br>
-  A live wallpaper written in Rust with GPUI. It uses about 3% of one CPU core and draws its art from your own copy of AoE2: Definitive Edition.
+  A live wallpaper written in Rust. It uses about 3% of one CPU core and draws its art from your own copy of AoE2: Definitive Edition.
 </p>
 
 <p align="center">
@@ -20,7 +20,6 @@
 <p align="center">
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024-b7410e?logo=rust&logoColor=white">
-  <img alt="GPUI" src="https://img.shields.io/badge/UI-GPUI-6b4fbb">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-2c7a3b">
 </p>
 
@@ -64,8 +63,13 @@ and ships move about. Rearrange your icons and the map regrows to fit, with a sh
 Wololand lives in the notification area. Right-click the monk for themes, shuffle, pause and exit.
 **Exit** restores your normal wallpaper. Tick *Start with Windows* to launch it quietly at sign-in.
 
-The game is found automatically through the Steam registry and `libraryfolders.vdf`, then the default Steam path,
-then the Xbox path. If yours lives somewhere else, set `game_path` in `%APPDATA%\Wololand\settings.json`.
+The game is found automatically, whether you have the **Steam** or the **Microsoft Store / Xbox app** version:
+
+- Steam: the Steam folders from the registry, every library in `libraryfolders.vdf`, the game's app manifest and its uninstall entry.
+- Microsoft Store / Xbox app: the game folders listed in each drive's `.GamingRoot`, `XboxGames` on every drive, and the `Microsoft.MSPhoenix` package registration.
+
+If it still isn't found, open the settings window and use **Game Folder → Change Folder** to point Wololand at your install.
+**Auto-detect** goes back to automatic search.
 
 ## How it works
 
@@ -75,7 +79,7 @@ then the Xbox path. If yours lives somewhere else, set `game_path` in `%APPDATA%
 | **Icon-aware layout** | Icon rectangles are read from the desktop `SysListView32` every 400 ms. A soft distance field around them drives the terrain blend, tree lines, walls, islands and paths. |
 | **Asset decoding** | A small SLD decoder (BC1/BC4 blocks, shadow layer) and a DXT1 DDS reader load sprites and terrain from the install, in memory only. |
 | **Scene build** | Terrain is blended per pixel across threads, then objects are placed on the isometric grid, depth-sorted and blitted. A rebuild takes 200–300 ms on a background thread. |
-| **Rendering** | GPUI (DirectX 11) draws one baked texture, two drifting water layers and the unit sprites, capped at the frame rate you choose (10–30 fps). |
+| **Rendering** | DirectX 11 draws one baked texture, two drifting water layers and the unit sprites, capped at the frame rate you choose (10–30 fps). |
 | **Units** | Animals and ships walk only on open ground near your icons, never under tree canopies. Ships stay in deep water. |
 
 On a 1920×1080 desktop animating at 15 fps it uses **about 3–4% of one CPU core** and **about 140 MB** of memory.
@@ -111,7 +115,7 @@ The binary is `target\release\wololand.exe`.
 ```
 src/
   main.rs       entry point, single instance, CLI helpers
-  app.rs        GPUI windows: the wallpaper and the settings UI
+  app.rs        windows: the wallpaper and the settings UI
   desktop.rs    attaching behind the icons, reading icon positions, cover detection
   scene.rs      map generation per theme
   actors.rs     animated units

@@ -36,39 +36,158 @@ fn has_graphics(p: &Path) -> bool {
     p.join("resources/_common/drs/graphics").is_dir()
 }
 
-/// Steam library folders listed in `libraryfolders.vdf`.
+/// AoE2 DE's Steam app id.
+const STEAM_APP: &str = "813780";
+
+fn reg_string(root: &windows_registry::Key, path: &str, name: &str) -> Option<String> {
+    root.open(path).and_then(|k| k.get_string(name)).ok().filter(|s| !s.is_empty())
+}
+
+/// Steam install folders from the registry (per-user and machine-wide keys).
+fn steam_roots() -> Vec<PathBuf> {
+    use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+    [
+        reg_string(CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        reg_string(LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        reg_string(LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|s| PathBuf::from(s.replace('/', "\\")))
+    .collect()
+}
+
+/// Every Steam library folder: the Steam folder itself plus those listed in `libraryfolders.vdf`.
 fn steam_libraries() -> Vec<PathBuf> {
     let mut libs = Vec::new();
-    let steam = windows_registry::CURRENT_USER
-        .open(r"Software\Valve\Steam")
-        .and_then(|k| k.get_string("SteamPath"))
-        .ok();
-    let Some(steam) = steam else { return libs };
-    let steam = PathBuf::from(steam.replace('/', "\\"));
-    libs.push(steam.clone());
-    if let Ok(vdf) = std::fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")) {
-        for line in vdf.lines() {
-            let parts: Vec<&str> = line.split('"').collect();
-            if parts.len() >= 4 && parts[1] == "path" {
-                libs.push(PathBuf::from(parts[3].replace("\\\\", "\\")));
+    for steam in steam_roots() {
+        libs.push(steam.clone());
+        for vdf in ["steamapps/libraryfolders.vdf", "config/libraryfolders.vdf"] {
+            let Ok(text) = std::fs::read_to_string(steam.join(vdf)) else { continue };
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split('"').collect();
+                if parts.len() >= 4 && parts[1] == "path" {
+                    libs.push(PathBuf::from(parts[3].replace("\\\\", "\\")));
+                }
             }
         }
     }
     libs
 }
 
+/// Candidates for the Steam version: each library's `appmanifest_813780.acf` names the install folder.
+fn steam_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for lib in steam_libraries() {
+        let apps = lib.join("steamapps");
+        if let Ok(acf) = std::fs::read_to_string(apps.join(format!("appmanifest_{STEAM_APP}.acf"))) {
+            for line in acf.lines() {
+                let parts: Vec<&str> = line.split('"').collect();
+                if parts.len() >= 4 && parts[1] == "installdir" {
+                    out.push(apps.join("common").join(parts[3]));
+                }
+            }
+        }
+        out.push(apps.join("common/AoE2DE"));
+    }
+    use windows_registry::LOCAL_MACHINE;
+    for base in [r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"] {
+        if let Some(p) = reg_string(LOCAL_MACHINE, &format!(r"{base}\Steam App {STEAM_APP}"), "InstallLocation") {
+            out.push(PathBuf::from(p));
+        }
+    }
+    out
+}
+
+/// Fixed drives that exist, `C:\` to `Z:\`.
+fn drives() -> Vec<PathBuf> {
+    (b'C'..=b'Z').map(|c| PathBuf::from(format!("{}:\\", c as char))).filter(|d| d.is_dir()).collect()
+}
+
+/// Folders the Xbox app installs games into. Each drive may hold a `.GamingRoot` file
+/// ("RGBX", a count, then NUL-terminated UTF-16 paths relative to the drive).
+fn xbox_game_folders() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for d in drives() {
+        if let Ok(bytes) = std::fs::read(d.join(".GamingRoot")) {
+            if bytes.len() > 8 && &bytes[..4] == b"RGBX" {
+                let words: Vec<u16> = bytes[8..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                for s in words.split(|&w| w == 0).filter(|s| !s.is_empty()) {
+                    let rel = String::from_utf16_lossy(s);
+                    out.push(d.join(rel.trim_start_matches(['\\', '/'])));
+                }
+            }
+        }
+        out.push(d.join("XboxGames"));
+        out.push(d.join(r"Program Files\ModifiableWindowsApps"));
+    }
+    out
+}
+
+/// Candidates for the Microsoft Store / Xbox app version.
+fn store_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for folder in xbox_game_folders() {
+        let Ok(rd) = std::fs::read_dir(&folder) else { continue };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if name.starts_with("age of empires ii") && !name.starts_with("age of empires iii") {
+                out.push(e.path().join("Content"));
+                out.push(e.path());
+            }
+        }
+    }
+    // Store package registration: AoE2 DE is the "Microsoft.MSPhoenix" package.
+    let packages = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+    if let Ok(k) = windows_registry::CURRENT_USER.open(packages) {
+        if let Ok(keys) = k.keys() {
+            for name in keys.filter(|n| n.starts_with("Microsoft.MSPhoenix")) {
+                if let Some(p) = reg_string(windows_registry::CURRENT_USER, &format!(r"{packages}\{name}"), "PackageRootFolder") {
+                    let p = PathBuf::from(p);
+                    out.push(p.join("Content"));
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Accepts the game folder itself, its parent `...\Age of Empires II- Definitive Edition` (Xbox),
+/// or a folder inside it such as `resources`.
+pub fn normalize_game_dir(p: &Path) -> Option<PathBuf> {
+    let mut tries = vec![p.to_path_buf(), p.join("Content"), p.join("AoE2DE")];
+    let mut up = p.parent();
+    while let Some(u) = up {
+        tries.push(u.to_path_buf());
+        up = u.parent();
+    }
+    tries.into_iter().find(|t| has_graphics(t))
+}
+
 impl Game {
+    /// The game at exactly this folder (after [`normalize_game_dir`]).
+    pub fn at(dir: &Path) -> Option<Game> {
+        normalize_game_dir(dir).map(|root| Game { root, uhd: false })
+    }
+
+    /// The custom folder if it holds the game, otherwise Steam, then the Microsoft Store / Xbox app.
     pub fn locate(custom: Option<&str>) -> Option<Game> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        if let Some(c) = custom.filter(|c| !c.is_empty()) {
-            candidates.push(PathBuf::from(c));
+        if let Some(g) = custom.filter(|c| !c.is_empty()).and_then(|c| Game::at(Path::new(c))) {
+            return Some(g);
         }
-        for lib in steam_libraries() {
-            candidates.push(lib.join("steamapps/common/AoE2DE"));
-        }
+        Game::detect()
+    }
+
+    /// Searches Steam and the Microsoft Store / Xbox app locations, ignoring any custom folder.
+    pub fn detect() -> Option<Game> {
+        let mut candidates = steam_candidates();
+        candidates.extend(store_candidates());
         candidates.push(PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\AoE2DE"));
-        candidates.push(PathBuf::from(r"C:\XboxGames\Age of Empires II- Definitive Edition\Content"));
-        candidates.into_iter().find(|p| has_graphics(p)).map(|root| Game { root, uhd: false })
+        candidates.push(PathBuf::from(r"C:\Program Files\Steam\steamapps\common\AoE2DE"));
+        let found = candidates.into_iter().find(|p| has_graphics(p));
+        crate::log(&format!("game search: {}", found.as_ref().map_or("not found".to_string(), |p| p.display().to_string())));
+        found.map(|root| Game { root, uhd: false })
     }
 
     pub fn root(&self) -> &Path {
