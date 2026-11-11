@@ -134,7 +134,13 @@ pub fn attach(hwnd: HWND) -> Option<Attachment> {
             let mut pid = 0u32;
             GetWindowThreadProcessId(progman, Some(&mut pid));
             unsafe extern "system" fn on_event(_: HWINEVENTHOOK, _: u32, _: HWND, id_object: i32, _: i32, _: u32, _: u32) {
-                if id_object == 0 {
+                // Explorer fires these for every window it creates or moves; at most one fix per
+                // 50 ms (the 400 ms poll catches anything skipped).
+                static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+                let now = START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1000;
+                if id_object == 0 && now.saturating_sub(LAST.load(Ordering::Relaxed)) >= 50 {
+                    LAST.store(now, Ordering::Relaxed);
                     ensure_z_order();
                 }
             }
@@ -161,9 +167,21 @@ pub fn ensure_z_order() {
         if GetWindow(anchor, GW_HWNDNEXT).ok() != Some(ours) {
             let _ = SetWindowPos(ours, Some(anchor), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
+        // Every WorkerW (the system wallpaper) must sit below us. Only move the ones that are
+        // above: pushing each one to the very bottom on every call would make several WorkerWs
+        // swap places forever, each move firing another reorder event in Explorer.
+        let mut below: Vec<HWND> = Vec::new();
+        let mut next = GetWindow(ours, GW_HWNDNEXT);
+        while let Ok(h) = next {
+            if h.is_invalid() || below.len() >= 256 {
+                break;
+            }
+            below.push(h);
+            next = GetWindow(h, GW_HWNDNEXT);
+        }
         let mut wk = find(Some(parent), None, w!("WorkerW"));
         while let Some(h) = wk {
-            if GetWindow(h, GW_HWNDNEXT).is_ok_and(|n| !n.is_invalid()) {
+            if !below.contains(&h) {
                 let _ = SetWindowPos(h, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
             wk = find(Some(parent), Some(h), w!("WorkerW"));
@@ -343,8 +361,45 @@ pub fn wallpaper_hidden(ours: HWND) -> bool {
             return false;
         }
         let covers = r.left <= s.left && r.top <= s.top && r.right >= s.right && r.bottom >= s.bottom;
+        // a window covering nearly all of the screen hides the wallpaper too
+        let iw = (r.right.min(s.right) - r.left.max(s.left)).max(0) as i64;
+        let ih = (r.bottom.min(s.bottom) - r.top.max(s.top)).max(0) as i64;
+        let area = ((s.right - s.left) as i64 * (s.bottom - s.top) as i64).max(1);
+        let covers = covers || iw * ih * 100 >= area * 92;
         let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
         let on_primary = cx >= s.left && cx < s.right && cy >= s.top && cy < s.bottom;
         on_primary && (covers || IsZoomed(fg).as_bool())
+    }
+}
+
+/// Run the calling thread at background priority (CPU, I/O and memory), for scene building.
+pub fn background_thread() {
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+/// One line of resource use for the log, to spot leaks on long runs.
+pub fn health() -> String {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetGuiResources, GetProcessHandleCount, GR_GDIOBJECTS, GR_USEROBJECTS};
+    unsafe {
+        let p = GetCurrentProcess();
+        let mut m = PROCESS_MEMORY_COUNTERS_EX { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        let _ = GetProcessMemoryInfo(p, &mut m as *mut _ as *mut PROCESS_MEMORY_COUNTERS, m.cb);
+        let mut handles = 0u32;
+        let _ = GetProcessHandleCount(p, &mut handles);
+        let gdi = GetGuiResources(p, GR_GDIOBJECTS);
+        let user = GetGuiResources(p, GR_USEROBJECTS);
+        format!("health: private {} MB, working set {} MB, handles {handles}, gdi {gdi}, user {user}", m.PrivateUsage >> 20, m.WorkingSetSize >> 20)
+    }
+}
+
+/// Lower the whole process below normal priority: a wallpaper should never compete with apps.
+pub fn lower_process_priority() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
     }
 }

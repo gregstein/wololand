@@ -18,6 +18,8 @@ pub struct Frame {
     pub main: Option<Layer<[u8; 4]>>,
     /// Shadow opacity, placed inside the frame canvas.
     pub shadow: Option<Layer<u8>>,
+    /// Player-colour mask on the main layer's grid (same placement as `main`).
+    pub player: Option<Layer<u8>>,
 }
 
 #[derive(Clone)]
@@ -79,6 +81,19 @@ fn decode_layer<T: Copy + Default, const N: usize>(
     let y1 = c.u16()? as i32;
     let x2 = c.u16()? as i32;
     let y2 = c.u16()? as i32;
+    decode_body(c, prev, dec, x1, y1, x2, y2)
+}
+
+/// Layer body after its bounds: flags, commands and blocks on the grid `(x1, y1)..(x2, y2)`.
+fn decode_body<T: Copy + Default, const N: usize>(
+    c: &mut Cursor,
+    prev: &Option<Layer<T>>,
+    dec: impl Fn(&[u8]) -> [T; N],
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Result<Layer<T>> {
     let flags = c.u8()?;
     let _ = c.u8()?;
     let bw = ((x2 - x1).max(0) as usize).div_ceil(4);
@@ -107,6 +122,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Frame>> {
     let mut frames = Vec::with_capacity(nframes);
     let mut prev_main: Option<Layer<[u8; 4]>> = None;
     let mut prev_shadow: Option<Layer<u8>> = None;
+    let mut prev_player: Option<Layer<u8>> = None;
     for _ in 0..nframes {
         let _canvas_w = c.u16()?;
         let _canvas_h = c.u16()?;
@@ -114,7 +130,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<Frame>> {
         let hotspot_y = c.u16()? as i32;
         let mask = c.u8()?;
         c.p += 3;
-        let (mut main, mut shadow) = (None, None);
+        let (mut main, mut shadow, mut player) = (None, None, None);
         for bit in 0..5 {
             if mask & (1 << bit) == 0 {
                 continue;
@@ -133,11 +149,20 @@ pub fn parse(data: &[u8]) -> Result<Vec<Frame>> {
                     prev_shadow = Some(l.clone());
                     shadow = Some(l);
                 }
-                _ => {} // outline, damage and player-colour masks are not needed
+                4 => {
+                    // player-colour mask: no bounds of its own, it shares the main layer's grid
+                    if let Some(m) = &main {
+                        let m: &Layer<[u8; 4]> = m;
+                        let l = decode_body(&mut c, &prev_player, bc4_block, m.x, m.y, m.x + m.w as i32, m.y + m.h as i32)?;
+                        prev_player = Some(l.clone());
+                        player = Some(l);
+                    }
+                }
+                _ => {} // outline and damage masks are not needed
             }
             c.p = next;
         }
-        frames.push(Frame { hotspot_x, hotspot_y, main, shadow });
+        frames.push(Frame { hotspot_x, hotspot_y, main, shadow, player });
     }
     Ok(frames)
 }

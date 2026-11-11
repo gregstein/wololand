@@ -197,12 +197,17 @@ impl Game {
     /// All frames of `<name>_x1.sld` (or `_x2`), shadow composed under the main graphic.
     /// `scale` resamples to the requested on-screen size.
     pub fn sprite(&self, name: &str, scale: f32) -> Result<Vec<Img>> {
+        self.sprite_pc(name, scale, None)
+    }
+
+    /// Like [`Game::sprite`], with the player-colour areas painted in `pc`.
+    pub fn sprite_pc(&self, name: &str, scale: f32, pc: Option<[u8; 3]>) -> Result<Vec<Img>> {
         let suffix = if self.uhd { "x2" } else { "x1" };
         let path = self.root.join(format!("resources/_common/drs/graphics/{name}_{suffix}.sld"));
         let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
         let frames = sld::parse(&data).with_context(|| format!("decoding {name}"))?;
         let scale = if self.uhd { scale / 2.0 } else { scale };
-        Ok(frames.iter().map(|f| compose(f).scaled(scale)).collect())
+        Ok(frames.iter().map(|f| compose(f, pc).scaled(scale)).collect())
     }
 
     /// Terrain texture `name` (e.g. `g_gr2`), box-filtered down to `n`x`n`.
@@ -232,7 +237,11 @@ impl Game {
     }
 }
 
-fn compose(f: &sld::Frame) -> Img {
+/// Player colours (the game's blue and red).
+pub const BLUE: [u8; 3] = [38, 84, 230];
+pub const RED: [u8; 3] = [220, 28, 28];
+
+fn compose(f: &sld::Frame, pc: Option<[u8; 3]>) -> Img {
     let (hx, hy) = (f.hotspot_x, f.hotspot_y);
     let mut x0 = i32::MAX;
     let mut y0 = i32::MAX;
@@ -270,7 +279,20 @@ fn compose(f: &sld::Frame) -> Img {
         for y in 0..m.h {
             let row = (m.y - y0) as usize + y;
             for x in 0..m.w {
-                let p = m.px[y * m.w + x];
+                let mut p = m.px[y * m.w + x];
+                if let (Some(c), Some(pl)) = (pc, &f.player) {
+                    let k = pl.px.get(y * pl.w + x).copied().unwrap_or(0);
+                    if k > 0 {
+                        // the mask carries shading: tint the pixel's brightness with the colour
+                        let t = k as f32 / 255.0;
+                        let lum = (p[0] as f32 * 0.3 + p[1] as f32 * 0.59 + p[2] as f32 * 0.11) / 255.0;
+                        let g = (0.25 + lum * 1.45).min(1.6);
+                        for i in 0..3 {
+                            let v = (c[i] as f32 * g).min(255.0);
+                            p[i] = (p[i] as f32 + (v - p[i] as f32) * t) as u8;
+                        }
+                    }
+                }
                 if p[3] > 0 {
                     px[row * w + (m.x - x0) as usize + x] = p;
                 }

@@ -68,7 +68,11 @@ pub struct Wallpaper {
     hidden: bool,
     last_poll: Instant,
     last_step: Instant,
-    anim_t: f32,
+    /// Water scroll offsets (logical px), each wrapped to its tile so they never lose precision.
+    water_phase: [f32; 4],
+    /// Icons changed: rebuild once they have stayed put for a moment (and the desktop is visible).
+    build_due: Option<Instant>,
+    last_health: Instant,
     to_drop: Vec<Arc<RenderImage>>,
     pub status: SharedString,
     _ticker: Option<Task<()>>,
@@ -105,7 +109,9 @@ impl Wallpaper {
             hidden: false,
             last_poll: Instant::now() - Duration::from_secs(5),
             last_step: Instant::now(),
-            anim_t: 0.0,
+            water_phase: [0.0, 0.0, 37.0, 11.0],
+            build_due: None,
+            last_health: Instant::now(),
             to_drop: Vec::new(),
             status: "Starting".into(),
             _ticker: Some(ticker),
@@ -265,8 +271,10 @@ impl Wallpaper {
         if now.duration_since(self.last_poll) >= Duration::from_millis(400) {
             self.last_poll = now;
             desktop::ensure_z_order();
+            // Debounce: a file being written to the desktop, or icons being dragged, changes the
+            // layout many times in a row; build once it settles instead of on every change.
             if self.read_icons() {
-                self.request_build(cx);
+                self.build_due = Some(now + Duration::from_millis(700));
             }
             if let Some(h) = self.hwnd {
                 let hidden = desktop::wallpaper_hidden(h) && std::env::var_os("WOLOLAND_NOPAUSE").is_none();
@@ -275,6 +283,14 @@ impl Wallpaper {
                     crate::log(if hidden { "paused: wallpaper covered" } else { "resumed" });
                 }
             }
+        }
+        if self.build_due.is_some_and(|t| now >= t) && !self.hidden {
+            self.build_due = None;
+            self.request_build(cx);
+        }
+        if now.duration_since(self.last_health) >= Duration::from_secs(600) {
+            self.last_health = now;
+            crate::log(&desktop::health());
         }
         let s = self.settings(cx);
         let (animate, fps, paused) = (s.animate, s.fps.clamp(5, 60), s.paused);
@@ -291,7 +307,14 @@ impl Wallpaper {
         }
         let moving = animate && (self.water.is_some() || self.world.as_ref().is_some_and(|w| !w.is_empty()));
         if active && moving {
-            self.anim_t += dt;
+            if let Some(w) = &self.water {
+                let (tw, th) = (w.w / self.scale, w.h / self.scale);
+                let p = &mut self.water_phase;
+                p[0] = (p[0] + dt * 7.0).rem_euclid(tw);
+                p[1] = (p[1] + dt * 3.5).rem_euclid(th);
+                p[2] = (p[2] - dt * 5.0).rem_euclid(tw);
+                p[3] = (p[3] + dt * 2.0).rem_euclid(th);
+            }
             if let (Some(world), Some(scene)) = (&mut self.world, &self.scene) {
                 world.step(scene, dt);
             }
@@ -355,7 +378,7 @@ impl Render for Wallpaper {
             let _ = window.drop_image(img);
         }
         let water = self.water.as_ref().map(|w| (w.w / scale, w.h / scale, w.a.clone(), w.b.clone()));
-        let t = self.anim_t;
+        let ph = self.water_phase;
         let sprites: Vec<(Bounds<Pixels>, Arc<RenderImage>)> = self
             .world
             .as_ref()
@@ -394,8 +417,8 @@ impl Render for Wallpaper {
                                     y += th;
                                 }
                             };
-                            layer(window, &a, t * 7.0, t * 3.5);
-                            layer(window, &b, -t * 5.0 + 37.0, t * 2.0 + 11.0);
+                            layer(window, &a, ph[0], ph[1]);
+                            layer(window, &b, ph[2], ph[3]);
                         },
                     )
                     .absolute()
@@ -833,6 +856,11 @@ fn map_icon(theme: Theme) -> &'static str {
         Theme::Arena => "rm_arena.png",
         Theme::BlackForest => "rm_black-forest.png",
         Theme::Islands => "rm_islands.png",
+        Theme::Nomad => "rm_nomad.png",
+        Theme::Hideout => "rm_hideout.png",
+        Theme::GoldRush => "rm_gold-rush.png",
+        Theme::ForestNothing => "rm_sherwood_forest.png",
+        Theme::Fortress => "rm_fortress.png",
     }
 }
 
@@ -888,7 +916,12 @@ impl Render for SettingsView {
         let status = st.wallpaper.as_ref().map(|w| w.read(cx).status.clone()).unwrap_or_default();
         let sel = Theme::ALL.iter().position(|&t| t == s.theme).unwrap_or(0);
         let thumb = self.thumbs[sel].clone();
-        let card_w = ((f32::from(window.viewport_size().width) - 560.0) / 4.0).clamp(96.0, 150.0);
+        // The map pool spans the window: all nine cards in a row when they fit, else two rows.
+        const CARD_GAP: f32 = 12.0;
+        let avail = f32::from(window.viewport_size().width) - 196.0;
+        let n = Theme::ALL.len() as f32;
+        let per_row = if (avail - (n - 1.0) * CARD_GAP) / n >= 110.0 { n } else { (n / 2.0).ceil() };
+        let card_w = ((avail - (per_row - 1.0) * CARD_GAP) / per_row).clamp(96.0, 170.0);
 
         // dark wood planks behind the parchment
         let planks = (0..14).map(|i| {
@@ -955,20 +988,37 @@ impl Render for SettingsView {
             }))
         });
 
-        let options = panel().flex_1().child(
-            panel_inner()
-                .child(heading("Wallpaper Settings:"))
-                .child(checkbox(&ui, "animate", "Animate units and water", s.animate).on_click(cx.listener(|_, _, _, cx| apply_cmd(Cmd::ToggleAnimate, cx))))
-                .child(checkbox(&ui, "paused", "Pause animation", s.paused).on_click(cx.listener(|_, _, _, cx| apply_cmd(Cmd::TogglePause, cx))))
-                .child(checkbox(&ui, "autostart", "Start with Windows", self.autostart).on_click(cx.listener(|this, _, _, cx| {
-                    this.autostart = !this.autostart;
-                    settings::set_autostart(this.autostart);
-                    cx.notify();
-                })))
-                .child(div().h(px(1.0)).bg(rgb(RULE_IN)).my_1())
-                .child(div().text_color(rgb(INK)).font_weight(FontWeight::BOLD).child("Frames per second"))
-                .child(div().flex().gap_2().children(fps_chips))
-                .child(div().text_sm().text_color(rgb(INK_SOFT)).child("Animation pauses by itself while a maximized window covers the desktop.")),
+        let options = panel().child(
+            panel_inner().child(heading("Wallpaper Settings:")).child(
+                div()
+                    .flex()
+                    .gap_6()
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(checkbox(&ui, "animate", "Animate units and water", s.animate).on_click(cx.listener(|_, _, _, cx| apply_cmd(Cmd::ToggleAnimate, cx))))
+                            .child(checkbox(&ui, "paused", "Pause animation", s.paused).on_click(cx.listener(|_, _, _, cx| apply_cmd(Cmd::TogglePause, cx))))
+                            .child(checkbox(&ui, "autostart", "Start with Windows", self.autostart).on_click(cx.listener(|this, _, _, cx| {
+                                this.autostart = !this.autostart;
+                                settings::set_autostart(this.autostart);
+                                cx.notify();
+                            }))),
+                    )
+                    .child(div().w(px(1.0)).bg(rgb(RULE_IN)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().text_color(rgb(INK)).font_weight(FontWeight::BOLD).child("Frames per second"))
+                            .child(div().flex().gap_2().children(fps_chips))
+                            .child(div().text_sm().text_color(rgb(INK_SOFT)).child("Animation pauses by itself while a maximized window covers the desktop.")),
+                    ),
+            ),
         );
 
         let cards = Theme::ALL.into_iter().enumerate().map(|(i, theme)| {
@@ -977,7 +1027,7 @@ impl Render for SettingsView {
         let maps = panel().child(
             panel_inner()
                 .child(heading("Map Themes:"))
-                .child(div().flex().flex_wrap().justify_center().gap_3().children(cards))
+                .child(div().flex().flex_wrap().justify_center().gap(px(CARD_GAP)).children(cards))
                 .child(
                     div()
                         .flex()
@@ -1075,7 +1125,8 @@ impl Render for SettingsView {
                             .child(div().italic().text_color(rgb(INK_SOFT)).child("Age of Empires II maps that grow around your desktop icons")),
                     )
                     .child(current)
-                    .child(div().flex().gap_4().child(options).child(maps))
+                    .child(maps)
+                    .child(options)
                     .child(game_panel)
                     .child(
                         div()
