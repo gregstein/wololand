@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=-jE_4aNMtw0"><img src="https://img.youtube.com/vi/-jE_4aNMtw0/maxresdefault.jpg" width="720" alt="Watch Wololand in action on YouTube (video by Pooplords)"></a><br>
-  <sub>Video by <a href="https://www.youtube.com/watch?v=-jE_4aNMtw0">Pooplords</a></sub>
+  <a href="https://www.youtube.com/watch?v=-jE_4aNMtw0"><img src="https://img.youtube.com/vi/-jE_4aNMtw0/maxresdefault.jpg" width="720" alt="Watch Wololand in action on YouTube (video by Poop Lord)"></a><br>
+  <sub>Video by <a href="https://www.youtube.com/@PoopLord">Poop Lord</a></sub>
 </p>
 
 <h1 align="center">Wololand</h1>
