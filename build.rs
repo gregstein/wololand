@@ -3,5 +3,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=assets/wololand.rc");
     println!("cargo:rerun-if-changed=assets/icon.ico");
+    println!("cargo:rerun-if-changed=assets/wololand.manifest");
     embed_resource::compile("assets/wololand.rc", embed_resource::NONE).manifest_optional().unwrap();
 }

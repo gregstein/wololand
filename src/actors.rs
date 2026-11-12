@@ -8,6 +8,7 @@ use anyhow::Result;
 use gpui::RenderImage;
 
 use crate::assets::{Game, Img, BLUE, RED};
+use crate::battle::{self, Battle};
 use crate::noise::Rng;
 use crate::scene::{PostKind, Scene, Theme, CELL, DEEP, OPEN, WATER};
 
@@ -39,8 +40,13 @@ impl Anim {
     }
 
     fn with_dirs(imgs: Vec<Img>, dirs: usize, cycle_secs: f32) -> Anim {
+        Anim::with_dirs_cap(imgs, dirs, cycle_secs, MAX_PER_DIR)
+    }
+
+    /// `imgs` split into `dirs` directions, keeping at most `cap` frames of each.
+    pub fn with_dirs_cap(imgs: Vec<Img>, dirs: usize, cycle_secs: f32, cap: usize) -> Anim {
         let total = (imgs.len() / dirs).max(1);
-        let per_dir = total.clamp(1, MAX_PER_DIR);
+        let per_dir = total.clamp(1, cap.max(1));
         let mut frames = Vec::with_capacity(dirs * per_dir);
         for d in 0..dirs {
             for k in 0..per_dir {
@@ -61,7 +67,15 @@ impl Anim {
     }
 
     pub fn frame(&self, dir: usize, t: f32) -> &Frame {
-        let k = (t * self.fps) as usize % self.per_dir;
+        self.nth(dir, (t * self.fps) as usize % self.per_dir)
+    }
+
+    /// Plays once and holds the last frame (a fall, a body rotting away).
+    pub fn once(&self, dir: usize, t: f32) -> &Frame {
+        self.nth(dir, ((t * self.fps) as usize).min(self.per_dir - 1))
+    }
+
+    fn nth(&self, dir: usize, k: usize) -> &Frame {
         &self.frames[((dir % self.dirs) * self.per_dir + k).min(self.frames.len() - 1)]
     }
 }
@@ -136,11 +150,13 @@ pub struct World {
     rng: Rng,
     ds: f32,
     parade: Option<Parade>,
+    battle: Option<Battle>,
 }
 
 pub struct Kit {
     species: Vec<Species>,
     parade: Option<[usize; 4]>,
+    battle: Option<battle::Kit>,
     ds: f32,
 }
 
@@ -158,6 +174,7 @@ impl Kit {
         let unit = |name: &str, idle: &str, pc: [u8; 3]| -> Result<(Anim, Option<Anim>)> { Ok((anim(name, Some(pc), 1.0)?, Some(anim(idle, Some(pc), 4.0)?))) };
         let work = |name: &str| anim(name, Some(BLUE), 1.6);
         let mut parade = None;
+        let mut war = None;
         let sheep = || herd("a_herd_sheep_walkA", "a_herd_sheep_idleA");
         let deer = || herd("a_hunt_deer_walkA", "a_hunt_deer_idleA");
         let wolf = || herd("a_pred_wolf_walkA", "a_pred_wolf_idleA");
@@ -257,12 +274,16 @@ impl Kit {
                 add(Kind::Herd, w, i, 18.0, 3);
                 add(Kind::Bird, bird("a_bird_hawk_flyA")?, None, 55.0, 1);
             }
+            Theme::IconWars => {
+                add(Kind::Bird, anim("a_bird_raven_flyA", None, 1.0)?, None, 60.0, 1);
+                war = Some(battle::Kit::load(game, ds)?);
+            }
         }
-        Ok(Kit { species: sp, parade, ds })
+        Ok(Kit { species: sp, parade, battle: war, ds })
     }
 }
 
-fn dir_of(dx: f32, dy: f32) -> usize {
+pub(crate) fn dir_of(dx: f32, dy: f32) -> usize {
     let a = dy.atan2(dx).rem_euclid(TAU);
     ((a / (TAU / 16.0)).round() as usize) % 16
 }
@@ -413,7 +434,8 @@ impl World {
     pub fn new(kit: Kit, scene: &Scene, seed: u64) -> World {
         let rng = Rng::new(seed ^ 0xa11);
         let parade = kit.parade.map(|sp| Parade { sp, stage: 0, wait: 0.5, run: None });
-        let mut w = World { species: kit.species, actors: Vec::new(), rng, ds: kit.ds, parade };
+        let battle = kit.battle.map(|k| Battle::new(k, scene, seed));
+        let mut w = World { species: kit.species, actors: Vec::new(), rng, ds: kit.ds, parade, battle };
         w.populate(scene);
         w
     }
@@ -590,8 +612,13 @@ impl World {
         }
     }
 
+    /// Icon Wars' battle, when this world has one.
+    pub fn battle(&self) -> Option<&Battle> {
+        self.battle.as_ref()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.actors.is_empty() && self.parade.is_none()
+        self.actors.is_empty() && self.parade.is_none() && self.battle.is_none()
     }
 
     /// After the icons moved: keep units that are still on valid ground, re-place the rest.
@@ -611,6 +638,9 @@ impl World {
         } else {
             self.place_static(scene);
         }
+        if let Some(b) = &mut self.battle {
+            b.setup(scene);
+        }
         if let Some(p) = &mut self.parade {
             // a chase in progress may now cross a new tree line: let it finish off-screen and restart
             if p.run.as_ref().is_some_and(|r| !r.line.windows(2).all(|q| free_path(scene, q[0], q[1]))) {
@@ -627,6 +657,7 @@ impl World {
             .iter()
             .flat_map(|s| s.walk.frames.iter().chain(s.idle.iter().flat_map(|i| i.frames.iter())))
             .map(|f| f.img.clone())
+            .chain(self.battle.iter().flat_map(|b| b.images()))
             .collect()
     }
 
@@ -671,6 +702,9 @@ impl World {
 
     pub fn step(&mut self, scene: &Scene, dt: f32) {
         self.step_parade(scene, dt);
+        if let Some(b) = &mut self.battle {
+            b.step(scene, dt);
+        }
         let (sw, sh) = (scene.w as f32, scene.h as f32);
         for a in &mut self.actors {
             let sp = &self.species[a.sp];
@@ -774,12 +808,13 @@ impl World {
                 None => format!("stage {} waiting {:.1}s", p.stage, p.wait),
             },
         };
-        format!("herd {} roam {} bird {} ship {} workers {} fishers {} fighters {} | chase: {chase}", n[0], n[1], n[2], n[3], n[4], n[6], n[7])
+        let war = self.battle.as_ref().map_or(String::new(), |b| format!(" | battle: {}", b.stats()));
+        format!("herd {} roam {} bird {} ship {} workers {} fishers {} fighters {} | chase: {chase}{war}", n[0], n[1], n[2], n[3], n[4], n[6], n[7])
     }
 
     /// Frames to paint this tick, sorted back to front: (x, y) is the hotspot.
     pub fn visible(&self) -> Vec<(f32, f32, &Frame)> {
-        let mut out: Vec<(bool, f32, f32, &Frame)> = Vec::with_capacity(self.actors.len() + 4);
+        let mut out: Vec<(u8, f32, f32, &Frame)> = Vec::with_capacity(self.actors.len() + 4);
         for a in &self.actors {
             if a.x < -5e3 {
                 continue;
@@ -789,7 +824,7 @@ impl World {
                 (State::Idle(_), Some(idle)) => idle,
                 _ => &sp.walk,
             };
-            out.push((sp.kind == Kind::Bird, a.x, a.y, anim.frame(a.dir, a.t)));
+            out.push((if sp.kind == Kind::Bird { 2 } else { 1 }, a.x, a.y, anim.frame(a.dir, a.t)));
         }
         if let Some(run) = self.parade.as_ref().and_then(|p| p.run.as_ref()) {
             let total = *run.acc.last().unwrap();
@@ -803,10 +838,13 @@ impl World {
                 let len = (tx * tx + ty * ty).sqrt().max(1e-3);
                 let (x, y) = point_at(&run.line, &run.acc, s);
                 let (x, y) = (x - ty / len * side, y + tx / len * side);
-                out.push((false, x, y, self.species[si].walk.frame(dir_of(tx, ty), run.t + i as f32 * 0.13)));
+                out.push((1, x, y, self.species[si].walk.frame(dir_of(tx, ty), run.t + i as f32 * 0.13)));
             }
         }
-        // ground units back to front, birds above everything
+        if let Some(b) = &self.battle {
+            out.extend(b.visible());
+        }
+        // bodies on the ground, then units back to front, birds above everything
         out.sort_by(|p, q| p.0.cmp(&q.0).then(p.2.total_cmp(&q.2)));
         out.into_iter().map(|(_, x, y, f)| (x, y, f)).collect()
     }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::aoe::{dds, sld};
+use crate::aoe::{dds, sld, smp};
 
 /// Strength of the baked SLD shadow layer (0..1).
 const SHADOW: f32 = 0.55;
@@ -208,6 +208,58 @@ impl Game {
         let frames = sld::parse(&data).with_context(|| format!("decoding {name}"))?;
         let scale = if self.uhd { scale / 2.0 } else { scale };
         Ok(frames.iter().map(|f| compose(f, pc).scaled(scale)).collect())
+    }
+
+    /// All frames of the SMP sprite `<name>_NN.smp` (the old effects, like the building flames),
+    /// coloured with the game's palettes and resampled by `scale`.
+    pub fn smp_sprite(&self, name: &str, scale: f32) -> Result<Vec<Img>> {
+        let drs = self.root.join("resources/_common/drs/graphics");
+        let path = if self.uhd { drs.join(format!("{name}_NN_x2.smp")) } else { drs.join(format!("{name}_NN.smp")) };
+        let data = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let frames = smp::parse(&data).with_context(|| format!("decoding {name}"))?;
+        // palette numbers come from palettes.conf ("16,b_dark.pal")
+        let pals = self.root.join("resources/_common/palettes");
+        let conf = std::fs::read_to_string(pals.join("palettes.conf")).context("reading palettes.conf")?;
+        let mut loaded: std::collections::HashMap<u8, Vec<[u8; 4]>> = std::collections::HashMap::new();
+        for f in &frames {
+            for &(pal, _) in f.px.iter().flatten() {
+                if loaded.contains_key(&pal) {
+                    continue;
+                }
+                let file = conf
+                    .lines()
+                    .filter_map(|l| l.split_once(','))
+                    .find(|(n, _)| n.trim().parse::<u8>() == Ok(pal))
+                    .map(|(_, f)| f.trim().to_string())
+                    .with_context(|| format!("palette {pal} not in palettes.conf"))?;
+                let text = std::fs::read_to_string(pals.join(&file)).with_context(|| format!("reading {file}"))?;
+                // JASC-PAL: two header lines and a count, then "r g b" per line
+                let cols = text
+                    .lines()
+                    .skip(3)
+                    .filter_map(|l| {
+                        let v: Vec<u8> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                        (v.len() >= 3).then(|| [v[0], v[1], v[2], 255])
+                    })
+                    .collect();
+                loaded.insert(pal, cols);
+            }
+        }
+        let scale = if self.uhd { scale / 2.0 } else { scale };
+        Ok(frames
+            .iter()
+            .map(|f| {
+                let px = f
+                    .px
+                    .iter()
+                    .map(|p| match p {
+                        Some((pal, i)) => loaded.get(pal).and_then(|c| c.get(*i as usize)).copied().unwrap_or([0, 0, 0, 0]),
+                        None => [0, 0, 0, 0],
+                    })
+                    .collect();
+                Img { ox: f.x, oy: f.y, w: f.w, h: f.h, px }.scaled(scale)
+            })
+            .collect())
     }
 
     /// Terrain texture `name` (e.g. `g_gr2`), box-filtered down to `n`x`n`.

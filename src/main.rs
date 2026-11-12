@@ -5,8 +5,11 @@ mod actors;
 mod aoe;
 mod app;
 mod assets;
+mod battle;
 mod desktop;
+mod iconfx;
 mod noise;
+mod overlay;
 mod scene;
 mod settings;
 mod tray;
@@ -31,6 +34,8 @@ fn main() -> Result<()> {
         "texsheet" => return texsheet(&args[2], &args[3]),
         "render" => return render_cli(&args[2..]),
         "simulate" => return simulate(&args[2], args.get(3).and_then(|s| s.parse().ok()).unwrap_or(300.0)),
+        "overlaytest" => return overlay::self_test(),
+        "fxtest" => return iconfx::self_test(args.get(2).map_or("fx.png", |s| s.as_str())),
         "pcsheet" => return pcsheet(&args[2], &args[3], args.get(4).and_then(|s| s.parse().ok()).unwrap_or(30)),
         "--theme" => {
             let want = args.get(2).map(|s| s.to_lowercase().replace([' ', '-', '_'], "")).unwrap_or_default();

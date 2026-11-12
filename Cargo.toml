@@ -1,6 +1,6 @@
 [package]
 name = "wololand"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Mohammed Amine Belbachir (GregStein)"]
 description = "Age of Empires II maps that grow around your Windows desktop icons"
@@ -11,7 +11,8 @@ homepage = "https://ageofnotes.com/wololand/"
 [dependencies]
 anyhow = "1.0.104"
 futures = "0.3"
-gpui = "0.2.2"
+# our own manifest (assets/wololand.manifest) replaces GPUI's, adding the Windows 8+ compatibility entry
+gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }

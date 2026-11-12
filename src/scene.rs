@@ -25,10 +25,11 @@ pub enum Theme {
     GoldRush,
     ForestNothing,
     Fortress,
+    IconWars,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 9] = [
+    pub const ALL: [Theme; 10] = [
         Theme::Arabia,
         Theme::Arena,
         Theme::BlackForest,
@@ -38,6 +39,7 @@ impl Theme {
         Theme::GoldRush,
         Theme::ForestNothing,
         Theme::Fortress,
+        Theme::IconWars,
     ];
 
     pub fn name(self) -> &'static str {
@@ -51,6 +53,7 @@ impl Theme {
             Theme::GoldRush => "Gold Rush",
             Theme::ForestNothing => "Forest Nothing",
             Theme::Fortress => "Fortress",
+            Theme::IconWars => "Icon Wars",
         }
     }
 
@@ -65,6 +68,7 @@ impl Theme {
             Theme::GoldRush => "Gold piles ring your icons while villagers mine them, and a wolf pack attacks villagers who fight back.",
             Theme::ForestNothing => "Forest from edge to edge, with small clearings cut around your icons.",
             Theme::Fortress => "Walled cities around your icons, castles in the countryside and people everywhere.",
+            Theme::IconWars => "Your desktop icons are invaded by the enemy.",
         }
     }
 
@@ -77,6 +81,7 @@ impl Theme {
             Theme::BlackForest | Theme::ForestNothing => &["g_for", "g_fo2", "g_grs", "g_r01", "g_underbrush_leaves"],
             Theme::Islands => &["g_gr2", "g_gr6", "g_bch", "g_sh2"],
             Theme::Fortress => &["g_gr2", "g_gr6", "g_rd1", "g_gr4", "g_for"],
+            Theme::IconWars => &["g_gr2", "g_gr6", "g_gr4", "g_for", "g_gr3"],
         }
     }
 
@@ -100,6 +105,7 @@ impl Theme {
             Theme::BlackForest | Theme::ForestNothing => vec!["n_tree_pine", "n_tree_oak", "n_tree_dead", "n_plant_grass_green"],
             Theme::Islands => vec!["n_tree_palm", "n_tree_oak", "n_plant_grass_green", "n_mine_gold"],
             Theme::Fortress => vec!["n_tree_oak", "n_tree_pine", "b_west_wall_stone", "n_mine_gold", "n_mine_stone", "n_forage_bush", "n_plant_grass_green"],
+            Theme::IconWars => vec!["n_tree_oak", "n_tree_pine", "n_plant_grass_green"],
         };
         if self == Theme::Fortress {
             v.extend(FORT_BUILDINGS.iter().map(|b| b.0));
@@ -247,6 +253,20 @@ pub struct Scene {
     pub dist: Vec<f32>,
     /// Where working villagers stand.
     pub posts: Vec<Post>,
+    /// The desktop icons the scene was built around.
+    pub icons: Vec<Rect>,
+    /// Icon Wars: copies of the ground under and around each icon (the rest of the ground image
+    /// goes to the GPU and is not kept).
+    pub patches: Vec<Patch>,
+}
+
+/// A rectangle of the ground image, straight RGBA.
+pub struct Patch {
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+    px: Vec<[u8; 4]>,
 }
 
 impl Scene {
@@ -264,6 +284,11 @@ impl Scene {
             return true;
         }
         self.free[cy as usize * self.gw + cx as usize]
+    }
+    /// Ground colour at (x, y) when it lies in one of the icon patches.
+    pub fn patch_px(&self, x: i32, y: i32) -> Option<[u8; 4]> {
+        let p = self.patches.iter().find(|p| x >= p.x0 && y >= p.y0 && x < p.x0 + p.w as i32 && y < p.y0 + p.h as i32)?;
+        Some(p.px[(y - p.y0) as usize * p.w + (x - p.x0) as usize])
     }
     pub fn dist_at(&self, x: f32, y: f32) -> f32 {
         let cx = ((x.max(0.0) / CELL) as usize).min(self.gw - 1);
@@ -422,6 +447,7 @@ impl Ctx<'_> {
             // nothing but forest: the clearings hug the icons
             Theme::ForestNothing => smoothstep(22.0 * ds, 52.0 * ds, d + (n1 - 0.5) * 40.0 * ds),
             Theme::Fortress => smoothstep(0.64, 0.665, n2) * smoothstep(self.wall_r + 150.0 * ds, self.wall_r + 230.0 * ds, d),
+            Theme::IconWars => smoothstep(0.66, 0.685, n2) * smoothstep(260.0 * ds, 320.0 * ds, d),
             Theme::Islands => 0.0,
         }
     }
@@ -443,7 +469,7 @@ impl Ctx<'_> {
         let mut alpha = 1.0f32;
         let forest = self.forest(d, n1, n2);
         match self.kit.theme {
-            Theme::Arabia | Theme::Nomad | Theme::GoldRush => {
+            Theme::Arabia | Theme::Nomad | Theme::GoldRush | Theme::IconWars => {
                 c = mix(c, tex(1), smoothstep(0.44, 0.58, n1 + fine * 0.12));
                 c = mix(c, tex(2), smoothstep(0.60, 0.70, n1 + fine * 0.15) * 0.9);
                 // trampled earth around the "town centre" (the icons)
@@ -600,7 +626,7 @@ pub fn build(kit: &ThemeKit, w: usize, h: usize, icons: &[Rect], seed: u64) -> S
     let (tex, water_tex) = kit.textures().unwrap_or_default();
     if tex.len() < kit.theme.textures().len() {
         let n = field.gw * field.gh;
-        return Scene { w, h, ground: vec![[40, 60, 30, 255]; w * h], water: None, gw: field.gw, gh: field.gh, cells: vec![0; n], free: vec![false; n], dist: field.d, posts: Vec::new() };
+        return Scene { w, h, ground: vec![[40, 60, 30, 255]; w * h], water: None, gw: field.gw, gh: field.gh, cells: vec![0; n], free: vec![false; n], dist: field.d, posts: Vec::new(), icons: icons.to_vec(), patches: Vec::new() };
     }
     // Nomad's coast runs along the side of the screen with fewer icons near it.
     let sea = (theme == Theme::Nomad).then(|| {
@@ -775,6 +801,15 @@ pub fn build(kit: &ThemeKit, w: usize, h: usize, icons: &[Rect], seed: u64) -> S
                     place(&mut objs, "n_plant_grass_green", x, y, v, 0.0);
                 }
             }
+            Theme::IconWars => {
+                if forest > 0.5 && r < 0.9 {
+                    place(&mut objs, if v < 0.35 { "n_tree_pine" } else { "n_tree_oak" }, x, y, tree, pad);
+                } else if d > 220.0 * ds && r < 0.006 {
+                    place(&mut objs, "n_tree_oak", x, y, v, pad);
+                } else if forest < 0.1 && r > 0.95 {
+                    place(&mut objs, "n_plant_grass_green", x, y, v, 0.0);
+                }
+            }
             Theme::Islands => {
                 if d < 2.0 * ds && d > -40.0 * ds && r < 0.28 {
                     place(&mut objs, "n_tree_palm", x, y, v, pad);
@@ -873,7 +908,7 @@ pub fn build(kit: &ThemeKit, w: usize, h: usize, icons: &[Rect], seed: u64) -> S
         Theme::Hideout => &[("n_mine_gold", 6, 30.0, 105.0), ("n_mine_stone", 5, 30.0, 105.0), ("n_forage_bush", 5, 25.0, 100.0)],
         Theme::Fortress => &[("n_mine_gold", 7, 320.0, 660.0), ("n_mine_stone", 5, 320.0, 660.0), ("n_forage_bush", 6, 300.0, 540.0)],
         Theme::Islands => &[("n_mine_gold", 4, -80.0, -30.0)],
-        Theme::BlackForest | Theme::ForestNothing => &[],
+        Theme::BlackForest | Theme::ForestNothing | Theme::IconWars => &[],
     };
     let mut centres: Vec<(f32, f32)> = Vec::new();
     for (pi, &(set, n, dmin, dmax)) in piles.iter().enumerate() {
@@ -1139,7 +1174,21 @@ pub fn build(kit: &ThemeKit, w: usize, h: usize, icons: &[Rect], seed: u64) -> S
     }
 
     let water = water_tex.as_ref().map(|t| water_tiles(t, ds, seed32));
-    Scene { w, h, ground, water, gw, gh, cells, free, dist: field.d, posts }
+    let patches = if theme == Theme::IconWars {
+        icons
+            .iter()
+            .map(|r| {
+                let (x0, y0) = ((r.x0 as i32 - 8).max(0), (r.y0 as i32 - 8).max(0));
+                let (x1, y1) = ((r.x1 as i32 + 8).min(w as i32), (r.y1 as i32 + 8).min(h as i32));
+                let (pw, ph) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+                let px = (0..pw * ph).map(|i| ground[(y0 as usize + i / pw) * w + x0 as usize + i % pw]).collect();
+                Patch { x0, y0, w: pw, h: ph, px }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Scene { w, h, ground, water, gw, gh, cells, free, dist: field.d, posts, icons: icons.to_vec(), patches }
 }
 
 /// Wall frames in `b_*_wall_*`: 0 rises to the right, 1 falls to the right, 2 a tower,

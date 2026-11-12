@@ -9,6 +9,7 @@ use gpui::*;
 use crate::actors::{self, World};
 use crate::assets::Game;
 use crate::desktop::{self, Attachment, IconReader};
+use crate::iconfx::IconFx;
 use crate::scene::{self, Rect, Scene, Theme, ThemeKit};
 use crate::settings::{self, Settings};
 use crate::tray::{self, Cmd, Tray};
@@ -74,6 +75,9 @@ pub struct Wallpaper {
     build_due: Option<Instant>,
     last_health: Instant,
     to_drop: Vec<Arc<RenderImage>>,
+    /// Icon Wars: the damage drawn over the real icons, and the icon pictures' rectangles.
+    fx: Option<IconFx>,
+    pics: Vec<(i32, i32, i32, i32)>,
     pub status: SharedString,
     _ticker: Option<Task<()>>,
 }
@@ -113,6 +117,8 @@ impl Wallpaper {
             build_due: None,
             last_health: Instant::now(),
             to_drop: Vec::new(),
+            fx: None,
+            pics: Vec::new(),
             status: "Starting".into(),
             _ticker: Some(ticker),
         };
@@ -276,6 +282,10 @@ impl Wallpaper {
             if self.read_icons() {
                 self.build_due = Some(now + Duration::from_millis(700));
             }
+            if self.theme == Some(Theme::IconWars) {
+                let (ox, oy) = self.origin;
+                self.pics = self.reader.icon_rects().unwrap_or_default().into_iter().map(|r| (r.left - ox, r.top - oy, r.right - ox, r.bottom - oy)).collect();
+            }
             if let Some(h) = self.hwnd {
                 let hidden = desktop::wallpaper_hidden(h) && std::env::var_os("WOLOLAND_NOPAUSE").is_none();
                 if hidden != self.hidden {
@@ -305,6 +315,10 @@ impl Wallpaper {
             }
             redraw = true;
         }
+        // the icons get their own look back as soon as the battle is over
+        if self.world.as_ref().is_none_or(|w| w.battle().is_none()) || self.theme != Some(Theme::IconWars) {
+            self.fx = None;
+        }
         let moving = animate && (self.water.is_some() || self.world.as_ref().is_some_and(|w| !w.is_empty()));
         if active && moving {
             if let Some(w) = &self.water {
@@ -317,6 +331,10 @@ impl Wallpaper {
             }
             if let (Some(world), Some(scene)) = (&mut self.world, &self.scene) {
                 world.step(scene, dt);
+                if world.battle().is_some() && self.theme == Some(Theme::IconWars) {
+                    let (origin, ds) = (self.origin, self.scale.max(0.5));
+                    self.fx.get_or_insert_with(|| IconFx::new(origin, ds)).update(world, scene, &self.pics, dt);
+                }
             }
             redraw = true;
         }
@@ -861,6 +879,7 @@ fn map_icon(theme: Theme) -> &'static str {
         Theme::GoldRush => "rm_gold-rush.png",
         Theme::ForestNothing => "rm_sherwood_forest.png",
         Theme::Fortress => "rm_fortress.png",
+        Theme::IconWars => "rm_land_madness.png",
     }
 }
 

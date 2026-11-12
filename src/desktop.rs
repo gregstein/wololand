@@ -62,6 +62,15 @@ fn spawn_workerw(progman: HWND, ready: impl Fn() -> bool) {
     }
 }
 
+/// The window that holds the desktop icons (Progman on Windows 11 24H2+, else a WorkerW).
+/// Overlays become its children, stacked above the icon layer.
+pub fn icon_host() -> Option<HWND> {
+    let dv = progman()
+        .and_then(|p| find(Some(p), None, w!("SHELLDLL_DefView")))
+        .or_else(|| defview_host().and_then(|h| find(Some(h), None, w!("SHELLDLL_DefView"))))?;
+    Some(unsafe { GetAncestor(dv, GA_PARENT) }).filter(|h| !h.is_invalid())
+}
+
 /// Primary monitor rectangle in physical pixels.
 pub fn primary_rect() -> RECT {
     unsafe {
@@ -282,6 +291,16 @@ impl IconReader {
     /// Icon rectangles in physical screen pixels. `None` when the list view is unavailable;
     /// an empty list when the user has hidden desktop icons.
     pub fn read(&mut self) -> Option<Vec<RECT>> {
+        self.rects(0)
+    }
+
+    /// The picture part of each icon (no label), in physical screen pixels.
+    pub fn icon_rects(&mut self) -> Option<Vec<RECT>> {
+        self.rects(1)
+    }
+
+    /// `part`: LVIR_BOUNDS (0) or LVIR_ICON (1).
+    fn rects(&mut self, part: i32) -> Option<Vec<RECT>> {
         unsafe {
             if self.mem.is_null() || !IsWindow(Some(self.list)).as_bool() {
                 if !self.open() {
@@ -296,7 +315,7 @@ impl IconReader {
             let _ = ClientToScreen(self.list, &mut origin);
             let mut out = Vec::with_capacity(count);
             for i in 0..count {
-                let mut r = RECT::default(); // left = LVIR_BOUNDS
+                let mut r = RECT { left: part, ..Default::default() };
                 let sz = std::mem::size_of::<RECT>();
                 if WriteProcessMemory(self.proc_, self.mem, &r as *const RECT as *const c_void, sz, None).is_err() {
                     self.close();
