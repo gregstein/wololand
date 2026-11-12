@@ -207,6 +207,10 @@ fn simulate(theme: &str, secs: f32) -> Result<()> {
                 }
             }
         }
+        // Icon Wars: the damage on the icons, as the overlays draw it
+        if let Some(b) = world.battle() {
+            iconfx::paint_snapshot(&mut img, b, &sc, t);
+        }
         img.save(out)?;
     }
     Ok(())

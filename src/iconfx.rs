@@ -326,7 +326,9 @@ fn draw(cv: &mut Canvas, seed: u32, phase: Phase, hp: f32, side: usize, since_hi
             for y in 0..ph {
                 for x in 0..pw {
                     let g = scene.patch_px(x0 + x, y0 + y).unwrap_or([60, 80, 40, 255]);
-                    let k = 1.0 - scorch * 0.3;
+                    // a soft burnt patch, fading out well inside the icon's square
+                    let (dx, dy) = ((x as f32 / pw as f32 - 0.5) * 2.0, (y as f32 / ph as f32 - 0.75) * 2.4);
+                    let k = 1.0 - scorch * (1.0 - (dx * dx + dy * dy).min(1.0)) * 0.55;
                     cv.put(ox + x, oy + y, [(g[0] as f32 * k) as u8, (g[1] as f32 * k) as u8, (g[2] as f32 * k) as u8], a);
                 }
             }
@@ -530,6 +532,56 @@ fn cracks(seed: u32, w: usize, h: usize, n: usize) -> Vec<(i32, i32)> {
         }
     }
     out
+}
+
+/// Developer picture: paint the battle's icons onto a snapshot of the scene, as they would look on
+/// a desktop. Standing icons are drawn as Wololand's own icon, since the real ones aren't there.
+pub fn paint_snapshot(img: &mut image::RgbaImage, battle: &Battle, scene: &Scene, clock: f32) {
+    let stand_in = image::load_from_memory(include_bytes!("../assets/icon.png")).map(|i| i.to_rgba8()).ok();
+    for (k, icon) in battle.icons().iter().enumerate() {
+        let r = icon.rect;
+        let side = ((r.x1 - r.x0) as i32).clamp(16, 48);
+        let x0 = ((r.x0 + r.x1) * 0.5) as i32 - side / 2;
+        let pic = (x0, r.y0 as i32 + 2, x0 + side, r.y0 as i32 + 2 + side);
+        let (wx, wy) = (pic.0 - PAD_X, pic.1 - PAD_TOP);
+        let (ww, wh) = (side + 2 * PAD_X, side + PAD_TOP + PAD_BOTTOM);
+        let icon_img = stand_in.as_ref().map(|i| image::imageops::resize(i, side as u32, side as u32, image::imageops::FilterType::Triangle));
+        let cut = icon_img.as_ref().filter(|_| icon.phase == Phase::Standing || matches!(icon.phase, Phase::Falling(_))).map(|i| Cut {
+            w: side as usize,
+            h: side as usize,
+            px: i.pixels().map(|p| p.0).collect(),
+        });
+        let mut buf = vec![0u32; (ww * wh) as usize];
+        let mut cv = Canvas { px: &mut buf, w: ww, h: wh };
+        draw(&mut cv, k as u32, icon.phase, icon.hp, icon.side, icon.since_hit, clock, pic, cut.as_ref(), scene, battle.rubble(), battle.flames(), (wx, wy), 1.0);
+        for y in 0..wh {
+            for x in 0..ww {
+                let (sx, sy) = (wx + x, wy + y);
+                if sx < 0 || sy < 0 || sx >= img.width() as i32 || sy >= img.height() as i32 {
+                    continue;
+                }
+                let d = img.get_pixel_mut(sx as u32, sy as u32);
+                let mut c = [d.0[0] as f32, d.0[1] as f32, d.0[2] as f32];
+                // what Explorer would draw: the icon itself, while it stands
+                if icon.phase == Phase::Standing {
+                    if let Some(i) = &icon_img {
+                        let (ix, iy) = (sx - pic.0, sy - pic.1);
+                        if ix >= 0 && iy >= 0 && ix < side && iy < side {
+                            let p = i.get_pixel(ix as u32, iy as u32).0;
+                            let a = p[3] as f32 / 255.0;
+                            for k in 0..3 {
+                                c[k] = p[k] as f32 * a + c[k] * (1.0 - a);
+                            }
+                        }
+                    }
+                }
+                let o = buf[(y * ww + x) as usize];
+                let a = (o >> 24) as f32 / 255.0;
+                let px = [((o >> 16) & 255) as f32 + c[0] * (1.0 - a), ((o >> 8) & 255) as f32 + c[1] * (1.0 - a), (o & 255) as f32 + c[2] * (1.0 - a)];
+                d.0 = [px[0].min(255.0) as u8, px[1].min(255.0) as u8, px[2].min(255.0) as u8, 255];
+            }
+        }
+    }
 }
 
 /// Developer check, without touching the screen: a sample icon on Icon Wars ground drawn through

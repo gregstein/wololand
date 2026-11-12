@@ -41,7 +41,8 @@ It reads where your icons are and builds the scene around them. Clearings open u
 shortcuts sit, woodlines and resources fill the space between them, and sheep, deer, wolves, birds,
 ships and villagers go about their business. Rearrange your icons and the map regrows to fit, with a short crossfade.
 
-- **Nine map themes:** Arabia, Arena, Black Forest, Islands, Nomad, Hideout, Gold Rush, Forest Nothing and Fortress. Switch from the tray, the settings window or the command line.
+- **Ten map themes:** Arabia, Arena, Black Forest, Islands, Nomad, Hideout, Gold Rush, Forest Nothing, Fortress and Icon Wars. Switch from the tray, the settings window or the command line.
+- **Icon Wars:** the red army invades your desktop and tears your icons down one by one, setting them on fire and leaving rubble behind. The icons stay clickable the whole time.
 - **A living map:** villagers mine gold and stone, raise a Town Center and a dock, and chop wood, fishing ships work the shallows, and on Arabia a blue scout chases a red one across the map, then three militia run past with a wolf on their heels, over and over. Animals and the chase go around resources and your icons, never across them.
 - **Real game art:** sprites (`.sld`) and terrain textures (`.dds`) are decoded straight from your install. Nothing is copied or redistributed.
 - **Light on resources:** the map is baked into a single texture, so each frame only redraws the water and a handful of animated units.
@@ -65,6 +66,7 @@ More maps:
 | **Gold Rush** | Gold piles arrange themselves in a ring around your icons, with villagers mining them. On one side of the map a pack of six to eight wolves attacks a group of villagers, who fight back. |
 | **Forest Nothing** | The whole map is forest. Small clearings open just around your icons, and woodcutters work their edges. No animals: just trees and villagers. |
 | **Fortress** | Each group of icons becomes a walled city with paved streets and houses. Castles, a market, a monastery, mills and towers stand in the countryside, with villagers, soldiers, knights, monks and trade carts everywhere. |
+| **Icon Wars** | Your desktop icons are invaded by the enemy. Waves of red men-at-arms, knights and archers march in from the screen edges and attack the icons one at a time. Each icon shows a health bar, cracks and catches fire as it weakens, then breaks apart into burning rubble. It stays destroyed until you pick another map. Once every icon is down, villagers build a castle on the conquered desktop and the army stands guard around it. You can still click, open and drag the icons throughout. |
 
 <p align="center">
   <img src="docs/screenshots/settings.jpg" width="640" alt="The settings window, styled after the game's menus">
@@ -97,6 +99,7 @@ If it still isn't found, open the settings window and use **Game Folder → Chan
 | **Scene build** | Terrain is blended per pixel across threads, then objects are placed on the isometric grid, depth-sorted and blitted. A rebuild takes 200–300 ms on a background thread. |
 | **Rendering** | DirectX 11 draws one baked texture, two drifting water layers and the unit sprites, capped at the frame rate you choose (10–30 fps). |
 | **Units** | Animals and ships walk only on open ground near your icons, never under tree canopies. Ships stay in deep water. Villagers work at posts the scene build leaves beside mines, foundations and trees. Player colours come from the sprites' own player-colour masks. |
+| **Icon Wars** | Soldiers find their way to the icons along flow fields around trees. The damage is drawn in small click-through layered windows kept just above the desktop icons in the stacking order, so every click still reaches the real icon. To break an icon apart, Wololand covers it with the map's ground and draws a copy taken from the screen the first time the icon is hit. |
 
 On a 1920×1080 desktop animating at 15 fps it uses **about 3–4% of one CPU core** and **about 140 MB** of memory.
 Paused or covered, it uses close to nothing.
@@ -107,7 +110,7 @@ Paused or covered, it uses close to nothing.
 |---|---|
 | `wololand.exe` | Start (or bring up the settings of the running instance) |
 | `wololand.exe --autostart` | Start silently in the tray |
-| `wololand.exe --theme arabia\|arena\|blackforest\|islands\|nomad\|hideout\|goldrush\|forestnothing\|fortress` | Switch the theme of the running instance |
+| `wololand.exe --theme arabia\|arena\|blackforest\|islands\|nomad\|hideout\|goldrush\|forestnothing\|fortress\|iconwars` | Switch the theme of the running instance |
 | `wololand.exe --exit` | Quit and restore the normal wallpaper |
 | `wololand.exe render <theme> <out.png> [w h icons]` | Render a scene offline around sample icons |
 | `wololand.exe simulate <theme> [seconds]` | Run a theme's units headless and print what they do (set `WOLOLAND_SNAPSHOT=out.png` for a picture) |
@@ -137,8 +140,11 @@ src/
   desktop.rs    attaching behind the icons, reading icon positions, cover detection
   scene.rs      map generation per theme
   actors.rs     animated units
+  battle.rs     Icon Wars: the army, the icons' hit points, the castle at the end
+  iconfx.rs     Icon Wars: the damage drawn over the real icons
+  overlay.rs    click-through windows above the desktop icons
   assets.rs     locating the game and loading sprites/textures
-  aoe/          SLD, DDS and BC1/BC4 decoders
+  aoe/          SLD, SMP, DDS and BC1/BC4 decoders
   tray.rs       notification-area icon and menu
   settings.rs   settings file and start-with-Windows
 ```
